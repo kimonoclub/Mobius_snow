@@ -1,0 +1,1280 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MÖBIUS SNOW (メビウス・スノー) - Retro Barycentric Shooter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050508;
+            color: #00FF66;
+            font-family: 'Press Start 2P', 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        .monitor-bezel {
+            position: relative;
+            padding: 16px;
+            background: #141619;
+            border: 4px solid #2a2e35;
+            border-radius: 16px;
+            box-shadow: 0 0 40px rgba(0, 255, 102, 0.12), inset 0 0 20px rgba(0, 0, 0, 0.9);
+            max-width: 98vw;
+        }
+        .screen-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            max-width: calc(98vw - 32px);
+            max-height: calc((98vw - 32px) * 0.75);
+            background-color: #000000;
+            border: 2px solid #00FF66;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+        /* 80年代CRTモニター風の走査線オーバーレイ */
+        .scanlines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(
+                rgba(18, 16, 16, 0) 50%, 
+                rgba(0, 0, 0, 0.28) 50%
+            );
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .cabinet-footer {
+            margin-top: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 10px;
+            color: #6b7280;
+            padding: 0 4px;
+        }
+        .cabinet-footer span.key {
+            color: #00FFFF;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="monitor-bezel">
+        <div class="screen-container">
+            <canvas id="gameCanvas" width="640" height="480"></canvas>
+            <div class="scanlines"></div>
+        </div>
+        <div class="cabinet-footer">
+            <div><span class="key">[ARROWS]</span> MOVE &nbsp; <span class="key">[SPACE]</span> FIRE &nbsp; <span class="key">[ENTER]</span> START</div>
+            <div><span class="key">[D]</span> DEBUG &nbsp; <span class="key">[M]</span> MUTE</div>
+        </div>
+    </div>
+
+<script>
+/**
+ * MÖBIUS SNOW (メビウス・スノー) - Barycentric Shooter Edition
+ * 1980s Retro Arcade Shooter & Dodge Game powered by Möbius Barycentric Coordinates
+ * ミサイル命中：大(L) -> 3つの中(M)に分裂 -> 2つの小(S)に分裂 -> 小(S)撃破で得点獲得
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// 画面・レイアウト定数 (4:3 640x480)
+const WIDTH = 640;
+const HEIGHT = 480;
+const HUD_TOP_Y = 38;
+const GROUND_Y = 438;
+const PLAY_AREA_TOP = HUD_TOP_Y + 4;
+const PLAY_AREA_BOTTOM = GROUND_Y - 4;
+
+// カラーパレット (80年代初期PCデジタルRGB風)
+const COLORS = {
+    BG: '#000000',
+    GREEN: '#00FF66',
+    CYAN: '#00FFFF',
+    MAGENTA: '#FF00FF',
+    YELLOW: '#FFFF00',
+    WHITE: '#FFFFFF',
+    RED: '#FF2A55',
+    DIM_CYAN: '#005566'
+};
+
+// 3段階サイズ定義（大・中・小）
+const SIZE_TYPES = {
+    L: {
+        label: 'L',
+        radius: 34,
+        color: COLORS.MAGENTA,
+        baseVy: 56,
+        vyRand: 22,
+        swayAmp: 14,
+        rotBase: 0.7,
+        splitCount: 3,
+        nextSize: 'M',
+        score: 0
+    },
+    M: {
+        label: 'M',
+        radius: 21,
+        color: COLORS.WHITE,
+        baseVy: 84,
+        vyRand: 30,
+        swayAmp: 22,
+        rotBase: 1.3,
+        splitCount: 2,
+        nextSize: 'S',
+        score: 0
+    },
+    S: {
+        label: 'S',
+        radius: 12,
+        color: COLORS.CYAN,
+        baseVy: 118,
+        vyRand: 40,
+        swayAmp: 28,
+        rotBase: 2.1,
+        splitCount: 0,
+        nextSize: null,
+        score: 100
+    }
+};
+
+// ゲーム状態
+const STATE = {
+    TITLE: 'TITLE',
+    PLAYING: 'PLAYING',
+    GAMEOVER: 'GAMEOVER'
+};
+
+let gameState = STATE.TITLE;
+let debugMode = false;
+let isMuted = false;
+
+// スコア・進行管理
+let score = 0;
+let hiScore = parseInt(localStorage.getItem('mobius_snow_hiscore') || '0', 10);
+let isNewRecord = false;
+let lastLevel = 1;
+let flashTimer = 0;
+let gameOverTimer = 0;
+let frameCount = 0;
+
+// プレイヤー仕様
+const player = {
+    x: WIDTH / 2,
+    y: GROUND_Y - 30,
+    radius: 6,
+    speed: 245, // px/sec
+    stepSoundTimer: 0,
+    fireCooldown: 0
+};
+
+// オブジェクト配列
+let triangles = [];
+let missiles = [];
+let particles = [];
+let floatingTexts = [];
+let spawnTimer = 0;
+let hitTriangle = null;
+let hitDebugInfo = null;
+let closestDebugInfo = null;
+
+// キー入力管理
+const keys = {};
+
+window.addEventListener('keydown', (e) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' ', 'Enter'].includes(e.key)) {
+        e.preventDefault();
+    }
+
+    keys[e.code] = true;
+    initAudio();
+
+    if (e.repeat) return;
+
+    if (e.code === 'Enter') {
+        if (gameState === STATE.TITLE || (gameState === STATE.GAMEOVER && gameOverTimer > 0.45)) {
+            startGame();
+        }
+    } else if (e.code === 'KeyD') {
+        debugMode = !debugMode;
+        playSystemBeep(debugMode ? 880 : 440, 0.05, 'square', 0.08);
+    } else if (e.code === 'KeyM') {
+        isMuted = !isMuted;
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
+});
+
+canvas.addEventListener('click', () => {
+    initAudio();
+    if (gameState === STATE.TITLE || (gameState === STATE.GAMEOVER && gameOverTimer > 0.45)) {
+        startGame();
+    }
+});
+
+// ==========================================
+// Web Audio API レトロビープ音合成エンジン
+// ==========================================
+let audioCtx = null;
+
+function initAudio() {
+    if (!audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+    }
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+}
+
+function playBeep(freq, duration, type = 'square', volume = 0.07, delay = 0) {
+    if (isMuted || !audioCtx || gameState !== STATE.PLAYING) return;
+    try {
+        const startTime = audioCtx.currentTime + delay;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, startTime);
+
+        gain.gain.setValueAtTime(volume, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+    } catch (e) {}
+}
+
+function playSystemBeep(freq, duration, type = 'square', volume = 0.08, delay = 0) {
+    if (isMuted || !audioCtx) return;
+    try {
+        const startTime = audioCtx.currentTime + delay;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, startTime);
+
+        gain.gain.setValueAtTime(volume, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+    } catch (e) {}
+}
+
+function playShootSound() {
+    if (isMuted || !audioCtx || gameState !== STATE.PLAYING) return;
+    try {
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(980, now);
+        osc.frequency.exponentialRampToValueAtTime(260, now + 0.07);
+
+        gain.gain.setValueAtTime(0.055, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.07);
+    } catch (e) {}
+}
+
+function playNoise(duration, volume = 0.14) {
+    if (isMuted || !audioCtx) return;
+    try {
+        const bufferSize = audioCtx.sampleRate * duration;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+        }
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+
+        noise.connect(gain);
+        gain.connect(audioCtx.destination);
+        noise.start();
+    } catch (e) {}
+}
+
+function playStartSound() {
+    playSystemBeep(523.25, 0.07, 'square', 0.08, 0.00);
+    playSystemBeep(659.25, 0.07, 'square', 0.08, 0.07);
+    playSystemBeep(783.99, 0.07, 'square', 0.08, 0.14);
+    playSystemBeep(1046.5, 0.16, 'square', 0.09, 0.21);
+}
+
+function playSplitSound(fromSize) {
+    if (fromSize === 'L') {
+        playBeep(330, 0.05, 'square', 0.055, 0.00);
+        playBeep(523.25, 0.07, 'square', 0.055, 0.04);
+    } else {
+        playBeep(587.33, 0.04, 'square', 0.05, 0.00);
+        playBeep(880, 0.06, 'square', 0.05, 0.03);
+    }
+}
+
+function playDestroySmallSound() {
+    playBeep(1046.5, 0.045, 'square', 0.065, 0.00);
+    playBeep(1567.98, 0.08, 'square', 0.065, 0.04);
+}
+
+function playLevelUpSound() {
+    playBeep(880, 0.06, 'square', 0.07, 0.00);
+    playBeep(1174.66, 0.12, 'square', 0.07, 0.06);
+}
+
+function playGameOverSound() {
+    playNoise(0.22, 0.16);
+    playSystemBeep(440, 0.10, 'sawtooth', 0.09, 0.05);
+    playSystemBeep(370, 0.10, 'sawtooth', 0.09, 0.15);
+    playSystemBeep(311, 0.10, 'sawtooth', 0.09, 0.25);
+    playSystemBeep(220, 0.30, 'sawtooth', 0.09, 0.35);
+}
+
+// ==========================================
+// コアアルゴリズム：メビウスの重心座標とマルチサンプリング当たり判定
+// ==========================================
+
+/**
+ * 点 P(px, py) が三角形 ABC のなかにあるかを重心座標で計算する関数
+ * 四則演算のみで、三角形がどれだけ回転・拡大縮小していても同じ式で判定できる
+ */
+function computeBarycentric(px, py, A, B, C) {
+    // 分母 D（三角形の符号付き面積の2倍）
+    const D = (B.y - C.y) * (A.x - C.x) + (C.x - B.x) * (A.y - C.y);
+
+    // 座標スケールに応じた相対的な許容誤差で退化三角形（面積0）をガード
+    const scale = Math.hypot(A.x - C.x, A.y - C.y) * Math.hypot(B.x - C.x, B.y - C.y);
+    if (Math.abs(D) <= 1e-8 * Math.max(1, scale)) {
+        return { wA: -1, wB: -1, wC: -1, inside: false };
+    }
+
+    // それぞれの頂点の重みを計算
+    const wA = ((B.y - C.y) * (px - C.x) + (C.x - B.x) * (py - C.y)) / D;
+    const wB = ((C.y - A.y) * (px - C.x) + (A.x - C.x) * (py - C.y)) / D;
+    const wC = 1.0 - wA - wB;
+
+    // 「すべて0以上」なら、中にいる（ヒット！）
+    const inside = (wA >= 0) && (wB >= 0) && (wC >= 0);
+
+    return { wA, wB, wC, inside };
+}
+
+/**
+ * プレイヤーのマルチサンプリング判定点を生成する（中心P ＋ 円周上の複数判定点）
+ */
+function getPlayerSamplePoints(p) {
+    const r = p.radius * 0.72; // ギリギリでかわせるレトロSTG風の内接判定半径
+    const diag = r * 0.7071;    // 斜め45度成分 (cos 45° = sin 45° ≒ 0.7071)
+
+    return [
+        { x: p.x,        y: p.y },        // 中心 P
+        { x: p.x,        y: p.y - r },    // 上
+        { x: p.x,        y: p.y + r },    // 下
+        { x: p.x - r,    y: p.y },        // 左
+        { x: p.x + r,    y: p.y },        // 右
+        { x: p.x - diag, y: p.y - diag }, // 左上
+        { x: p.x + diag, y: p.y - diag }, // 右上
+        { x: p.x - diag, y: p.y + diag }, // 左下
+        { x: p.x + diag, y: p.y + diag }  // 右下
+    ];
+}
+
+/**
+ * プレイヤーと三角形の衝突判定（全サンプル点を重心座標で評価）
+ * デバッグ表示用に「最も内部に近い（またはヒットした）判定点」の情報も返す
+ */
+function evaluatePlayerTriangle(p, tri) {
+    const [A, B, C] = tri.vertices;
+    const samplePoints = getPlayerSamplePoints(p);
+
+    let bestEval = null;
+    let bestMinWeight = -Infinity;
+
+    for (let i = 0; i < samplePoints.length; i++) {
+        const pt = samplePoints[i];
+        const bary = computeBarycentric(pt.x, pt.y, A, B, C);
+
+        // 3つの重みの最小値が大きいほど三角形の内部に近い（すべて0以上なら内部）
+        const minWeight = Math.min(bary.wA, bary.wB, bary.wC);
+        if (minWeight > bestMinWeight) {
+            bestMinWeight = minWeight;
+            bestEval = { bary, point: pt };
+        }
+
+        if (bary.inside) {
+            return { hit: true, bary, point: pt };
+        }
+    }
+
+    return {
+        hit: false,
+        bary: bestEval.bary,
+        point: bestEval.point
+    };
+}
+
+/**
+ * ミサイルの連続軌跡マルチサンプリング判定
+ * 高速移動するミサイルがフレーム間で三角形をすり抜けないよう、前フレーム位置〜現在位置を分割判定
+ */
+function checkMissileTriangleCollision(m, tri) {
+    const [A, B, C] = tri.vertices;
+    const steps = 5;
+    const startY = m.prevY + m.length * 0.5;
+    const endY = m.y - m.length * 0.5;
+
+    for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const sampleY = startY + (endY - startY) * t;
+        const bary = computeBarycentric(m.x, sampleY, A, B, C);
+        if (bary.inside) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ==========================================
+// 三角形（大・中・小）の生成・分裂・更新
+// ==========================================
+function getCurrentLevel() {
+    return Math.floor(score / 1000) + 1;
+}
+
+function createTriangle(sizeKey, x, y, vxSpread = 0, vyCurrent = null, isDemo = false) {
+    const cfg = SIZE_TYPES[sizeKey];
+    const levelIdx = isDemo ? 0 : (getCurrentLevel() - 1);
+
+    const angleOffsets = Math.random() < 0.55
+        ? [0, (2 * Math.PI) / 3, (4 * Math.PI) / 3]
+        : [0, 2.35, 3.93];
+
+    const vy = vyCurrent !== null
+        ? vyCurrent
+        : (cfg.baseVy + levelIdx * 12 + Math.random() * cfg.vyRand);
+
+    const swayAmp = cfg.swayAmp * (0.7 + Math.random() * 0.6);
+    const swayFreq = 1.3 + Math.random() * 2.0;
+    const swayPhase = Math.random() * Math.PI * 2;
+
+    const rotDir = Math.random() < 0.5 ? 1 : -1;
+    const rotSpeed = rotDir * (cfg.rotBase + Math.random() * 1.4);
+
+    const tri = {
+        sizeKey,
+        cx0: x,
+        cx: x,
+        cy: y,
+        vxSpread,
+        R: cfg.radius,
+        angleOffsets,
+        theta: Math.random() * Math.PI * 2,
+        rotSpeed,
+        vy,
+        swayAmp,
+        swayFreq,
+        swayPhase,
+        age: 0,
+        color: cfg.color,
+        vertices: [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }]
+    };
+
+    updateTriangleVertices(tri);
+    return tri;
+}
+
+function spawnTopTriangle(isDemo = false) {
+    const roll = Math.random();
+    let sizeKey = 'M';
+    if (roll < 0.38) {
+        sizeKey = 'L';
+    } else if (roll < 0.75) {
+        sizeKey = 'M';
+    } else {
+        sizeKey = 'S';
+    }
+
+    const cfg = SIZE_TYPES[sizeKey];
+    const x = cfg.radius + 18 + Math.random() * (WIDTH - (cfg.radius + 18) * 2);
+    const y = PLAY_AREA_TOP - cfg.radius - 8;
+
+    triangles.push(createTriangle(sizeKey, x, y, 0, null, isDemo));
+}
+
+function handleTriangleShot(tri, index) {
+    triangles.splice(index, 1);
+
+    if (tri.sizeKey === 'L') {
+        // 大 -> 3つの「中(M)」に分裂
+        spawnSplitParticles(tri.cx, tri.cy, COLORS.MAGENTA, 12);
+        playSplitSound('L');
+        addFloatingText(tri.cx, tri.cy, 'SPLIT!', COLORS.MAGENTA);
+
+        const spreadVx = [-105, 0, 105];
+        const offsetX = [-16, 0, 16];
+        const offsetY = [4, -12, 4];
+
+        for (let i = 0; i < 3; i++) {
+            const nx = Math.max(26, Math.min(WIDTH - 26, tri.cx + offsetX[i]));
+            const ny = Math.max(PLAY_AREA_TOP + 20, tri.cy + offsetY[i]);
+            const child = createTriangle('M', nx, ny, spreadVx[i], -45, false);
+            triangles.push(child);
+        }
+    } else if (tri.sizeKey === 'M') {
+        // 中 -> 2つの「小(S)」に分裂
+        spawnSplitParticles(tri.cx, tri.cy, COLORS.WHITE, 9);
+        playSplitSound('M');
+        addFloatingText(tri.cx, tri.cy, 'SPLIT!', COLORS.WHITE);
+
+        const spreadVx = [-95, 95];
+        const offsetX = [-12, 12];
+
+        for (let i = 0; i < 2; i++) {
+            const nx = Math.max(18, Math.min(WIDTH - 18, tri.cx + offsetX[i]));
+            const ny = Math.max(PLAY_AREA_TOP + 16, tri.cy);
+            const child = createTriangle('S', nx, ny, spreadVx[i], -35, false);
+            triangles.push(child);
+        }
+    } else if (tri.sizeKey === 'S') {
+        // 小 -> 消滅して得点獲得
+        const pts = SIZE_TYPES.S.score;
+        score += pts;
+
+        if (score > hiScore) {
+            hiScore = score;
+            isNewRecord = true;
+            localStorage.setItem('mobius_snow_hiscore', String(hiScore));
+        }
+
+        spawnSplitParticles(tri.cx, tri.cy, COLORS.CYAN, 14);
+        playDestroySmallSound();
+        addFloatingText(tri.cx, tri.cy, `+${pts}`, COLORS.YELLOW);
+
+        const currentLv = getCurrentLevel();
+        if (currentLv > lastLevel) {
+            lastLevel = currentLv;
+            playLevelUpSound();
+            addFloatingText(WIDTH / 2, PLAY_AREA_TOP + 45, `LEVEL ${currentLv}!`, COLORS.GREEN);
+        }
+    }
+}
+
+function spawnSplitParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+        const speed = 50 + Math.random() * 90;
+        particles.push({
+            x,
+            y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.25 + Math.random() * 0.18,
+            color
+        });
+    }
+}
+
+function addFloatingText(x, y, text, color) {
+    floatingTexts.push({
+        x,
+        y,
+        text,
+        color,
+        life: 0.65
+    });
+}
+
+function updateTriangleVertices(tri) {
+    for (let i = 0; i < 3; i++) {
+        const a = tri.theta + tri.angleOffsets[i];
+        tri.vertices[i].x = tri.cx + tri.R * Math.cos(a);
+        tri.vertices[i].y = tri.cy + tri.R * Math.sin(a);
+    }
+}
+
+// ==========================================
+// ミサイル発射・更新
+// ==========================================
+function fireMissile() {
+    if (missiles.length >= 7) return;
+
+    const startY = player.y - player.radius - 4;
+    missiles.push({
+        x: player.x,
+        y: startY,
+        prevY: startY,
+        vy: -540, // px/sec
+        length: 12
+    });
+    player.fireCooldown = 0.16;
+    playShootSound();
+}
+
+// ==========================================
+// ゲーム制御フロー
+// ==========================================
+function startGame() {
+    gameState = STATE.PLAYING;
+    score = 0;
+    lastLevel = 1;
+    isNewRecord = false;
+    flashTimer = 0;
+    gameOverTimer = 0;
+    hitTriangle = null;
+    hitDebugInfo = null;
+    closestDebugInfo = null;
+
+    player.x = WIDTH / 2;
+    player.y = GROUND_Y - 30;
+    player.stepSoundTimer = 0;
+    player.fireCooldown = 0.1;
+
+    triangles = [];
+    missiles = [];
+    particles = [];
+    floatingTexts = [];
+    spawnTimer = 0;
+
+    const initSizes = ['L', 'M', 'S', 'L'];
+    for (let i = 0; i < initSizes.length; i++) {
+        const sz = initSizes[i];
+        const x = 80 + (i * (WIDTH - 160)) / 3 + (Math.random() * 30 - 15);
+        const y = PLAY_AREA_TOP + 15 + Math.random() * 40;
+        triangles.push(createTriangle(sz, x, y, 0, null, false));
+    }
+
+    playStartSound();
+}
+
+function triggerGameOver(tri, evalResult) {
+    gameState = STATE.GAMEOVER;
+    gameOverTimer = 0;
+    hitTriangle = tri;
+    hitDebugInfo = {
+        tri,
+        bary: evalResult.bary,
+        point: evalResult.point
+    };
+    flashTimer = 0.18;
+
+    if (score > hiScore) {
+        hiScore = score;
+        isNewRecord = true;
+        localStorage.setItem('mobius_snow_hiscore', String(hiScore));
+    }
+
+    playGameOverSound();
+}
+
+// ==========================================
+// メイン更新ロジック (dt: 秒単位)
+// ==========================================
+function update(dt) {
+    frameCount++;
+
+    if (flashTimer > 0) {
+        flashTimer = Math.max(0, flashTimer - dt);
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const pt = particles[i];
+        pt.x += pt.vx * dt;
+        pt.y += pt.vy * dt;
+        pt.life -= dt;
+        if (pt.life <= 0) {
+            particles.splice(i, 1);
+        }
+    }
+
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        const ft = floatingTexts[i];
+        ft.y -= 28 * dt;
+        ft.life -= dt;
+        if (ft.life <= 0) {
+            floatingTexts.splice(i, 1);
+        }
+    }
+
+    if (gameState === STATE.TITLE) {
+        spawnTimer += dt;
+        if (spawnTimer >= 0.65) {
+            spawnTimer = 0;
+            if (triangles.length < 18) spawnTopTriangle(true);
+        }
+        updateTrianglesList(dt, true);
+        return;
+    }
+
+    if (gameState === STATE.GAMEOVER) {
+        gameOverTimer += dt;
+        return;
+    }
+
+    // --- プレイ中の更新 ---
+    if (player.fireCooldown > 0) {
+        player.fireCooldown = Math.max(0, player.fireCooldown - dt);
+    }
+
+    // 1. プレイヤーの8方向等速移動
+    let dx = 0;
+    let dy = 0;
+    if (keys['ArrowLeft'] || keys['KeyA']) dx -= 1;
+    if (keys['ArrowRight']) dx += 1;
+    if (keys['ArrowUp'] || keys['KeyW']) dy -= 1;
+    if (keys['ArrowDown'] || keys['KeyS']) dy += 1;
+
+    if (dx !== 0 || dy !== 0) {
+        const len = Math.hypot(dx, dy);
+        dx /= len;
+        dy /= len;
+
+        player.x += dx * player.speed * dt;
+        player.y += dy * player.speed * dt;
+
+        const minX = 12 + player.radius;
+        const maxX = WIDTH - 12 - player.radius;
+        const minY = PLAY_AREA_TOP + player.radius + 4;
+        const maxY = GROUND_Y - player.radius - 2;
+
+        player.x = Math.max(minX, Math.min(maxX, player.x));
+        player.y = Math.max(minY, Math.min(maxY, player.y));
+
+        player.stepSoundTimer += dt;
+        if (player.stepSoundTimer >= 0.09) {
+            player.stepSoundTimer = 0;
+            playBeep(190 + Math.random() * 30, 0.02, 'square', 0.02);
+        }
+    }
+
+    // 2. スペースキーでミサイル発射
+    if (keys['Space'] && player.fireCooldown <= 0) {
+        fireMissile();
+    }
+
+    // 3. ミサイルの移動と三角形との命中判定
+    for (let mi = missiles.length - 1; mi >= 0; mi--) {
+        const m = missiles[mi];
+        m.prevY = m.y;
+        m.y += m.vy * dt;
+
+        if (m.y + m.length < PLAY_AREA_TOP) {
+            missiles.splice(mi, 1);
+            continue;
+        }
+
+        let hitAny = false;
+        for (let ti = triangles.length - 1; ti >= 0; ti--) {
+            const tri = triangles[ti];
+            if (checkMissileTriangleCollision(m, tri)) {
+                missiles.splice(mi, 1);
+                handleTriangleShot(tri, ti);
+                hitAny = true;
+                break;
+            }
+        }
+        if (hitAny) continue;
+    }
+
+    // 4. 新規三角形のスポーン
+    const levelIdx = getCurrentLevel() - 1;
+    const spawnInterval = Math.max(0.32, 0.72 - levelIdx * 0.05);
+    spawnTimer += dt;
+    while (spawnTimer >= spawnInterval) {
+        spawnTimer -= spawnInterval;
+        spawnTopTriangle(false);
+    }
+
+    // 5. 三角形の移動・プレイヤーとの当たり判定
+    updateTrianglesList(dt, false);
+}
+
+function updateTrianglesList(dt, isDemo) {
+    let minDistSq = Infinity;
+    let nearestDebugCandidate = null;
+
+    const levelIdx = isDemo ? 0 : (getCurrentLevel() - 1);
+
+    for (let i = triangles.length - 1; i >= 0; i--) {
+        const t = triangles[i];
+        const cfg = SIZE_TYPES[t.sizeKey];
+        t.age += dt;
+
+        const targetVy = cfg.baseVy + levelIdx * 12;
+        if (t.vy < targetVy) {
+            t.vy = Math.min(targetVy, t.vy + 220 * dt);
+        }
+
+        t.cy += t.vy * dt;
+
+        if (Math.abs(t.vxSpread) > 0.5) {
+            t.cx0 += t.vxSpread * dt;
+            t.vxSpread *= Math.pow(0.08, dt);
+        }
+
+        t.cx0 = Math.max(t.R + 10, Math.min(WIDTH - t.R - 10, t.cx0));
+        t.cx = t.cx0 + t.swayAmp * Math.sin(t.swayFreq * t.age + t.swayPhase);
+        t.cx = Math.max(t.R + 6, Math.min(WIDTH - t.R - 6, t.cx));
+
+        t.theta += t.rotSpeed * dt;
+        updateTriangleVertices(t);
+
+        if (t.cy - t.R > GROUND_Y) {
+            triangles.splice(i, 1);
+            continue;
+        }
+
+        if (!isDemo) {
+            // メビウス重心座標によるマルチサンプリング当たり判定
+            const evalResult = evaluatePlayerTriangle(player, t);
+            if (evalResult.hit) {
+                triggerGameOver(t, evalResult);
+                return;
+            }
+
+            // デバッグ表示用に最も近い三角形とその最接近サンプル点を記録
+            const dSq = (t.cx - player.x) ** 2 + (t.cy - player.y) ** 2;
+            if (dSq < minDistSq) {
+                minDistSq = dSq;
+                nearestDebugCandidate = {
+                    tri: t,
+                    bary: evalResult.bary,
+                    point: evalResult.point
+                };
+            }
+        }
+    }
+
+    if (!isDemo) {
+        closestDebugInfo = nearestDebugCandidate;
+    }
+}
+
+// ==========================================
+// 描画ロジック (80年代レトロアーケード風)
+// ==========================================
+function draw() {
+    ctx.fillStyle = COLORS.BG;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    if (flashTimer > 0) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        return;
+    }
+
+    drawTopHUD();
+    drawGroundAndFooter();
+
+    for (const m of missiles) {
+        drawMissile(m);
+    }
+
+    for (const pt of particles) {
+        ctx.fillStyle = pt.color;
+        ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3);
+    }
+
+    for (const t of triangles) {
+        const isHit = (gameState === STATE.GAMEOVER && t === hitTriangle);
+        drawTriangle(t, isHit);
+    }
+
+    for (const ft of floatingTexts) {
+        ctx.font = '9px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = ft.color;
+        ctx.fillText(ft.text, ft.x, ft.y);
+    }
+
+    // デバッグモード（Dキー）：メビウスの重心座標の視覚化
+    if (debugMode && gameState !== STATE.TITLE) {
+        drawBarycentricDebug();
+    }
+
+    if (gameState !== STATE.TITLE) {
+        drawPlayer();
+    }
+
+    if (gameState === STATE.TITLE) {
+        drawTitleScreen();
+    } else if (gameState === STATE.GAMEOVER) {
+        drawGameOverScreen();
+    }
+}
+
+function drawTopHUD() {
+    ctx.font = '12px "Press Start 2P", monospace';
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = COLORS.GREEN;
+    ctx.textAlign = 'left';
+    const scoreStr = String(score).padStart(6, '0');
+    ctx.fillText(`SCORE:${scoreStr}`, 16, 20);
+
+    const lv = getCurrentLevel();
+    ctx.fillStyle = COLORS.CYAN;
+    ctx.textAlign = 'center';
+    ctx.fillText(`LV.${lv}`, WIDTH / 2 + 12, 20);
+
+    ctx.fillStyle = isNewRecord ? COLORS.YELLOW : COLORS.GREEN;
+    ctx.textAlign = 'right';
+    const hiStr = String(hiScore).padStart(6, '0');
+    ctx.fillText(`HI:${hiStr}`, WIDTH - 16, 20);
+
+    ctx.strokeStyle = COLORS.GREEN;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(10, HUD_TOP_Y);
+    ctx.lineTo(WIDTH - 10, HUD_TOP_Y);
+    ctx.stroke();
+}
+
+function drawGroundAndFooter() {
+    ctx.strokeStyle = COLORS.GREEN;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(10, GROUND_Y);
+    ctx.lineTo(WIDTH - 10, GROUND_Y);
+    ctx.moveTo(10, GROUND_Y + 4);
+    ctx.lineTo(WIDTH - 10, GROUND_Y + 4);
+    ctx.stroke();
+
+    ctx.font = '9px "Press Start 2P", monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = COLORS.GREEN;
+    ctx.fillText('[ARROWS] MOVE  [SPACE] FIRE', 16, GROUND_Y + 22);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = debugMode ? COLORS.YELLOW : COLORS.CYAN;
+    ctx.fillText(`[D] DEBUG:${debugMode ? 'ON' : 'OFF'}`, WIDTH - 16, GROUND_Y + 22);
+}
+
+function drawMissile(m) {
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.fillRect(m.x - 2, m.y - m.length * 0.5, 4, m.length);
+
+    ctx.fillStyle = COLORS.WHITE;
+    ctx.fillRect(m.x - 1, m.y - m.length * 0.5 + 1, 2, m.length - 2);
+}
+
+function drawTriangle(tri, isHit) {
+    const [A, B, C] = tri.vertices;
+
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y);
+    ctx.lineTo(B.x, B.y);
+    ctx.lineTo(C.x, C.y);
+    ctx.closePath();
+
+    if (isHit) {
+        ctx.fillStyle = 'rgba(255, 42, 85, 0.45)';
+        ctx.fill();
+        ctx.strokeStyle = COLORS.RED;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        return;
+    }
+
+    ctx.strokeStyle = tri.color;
+    ctx.lineWidth = tri.sizeKey === 'L' ? 2.2 : 1.7;
+    ctx.stroke();
+
+    ctx.fillStyle = tri.color;
+    if (tri.sizeKey === 'L') {
+        for (let i = 0; i < 3; i++) {
+            const a = tri.theta + tri.angleOffsets[i];
+            const dx = tri.cx + (tri.R * 0.35) * Math.cos(a);
+            const dy = tri.cy + (tri.R * 0.35) * Math.sin(a);
+            ctx.fillRect(dx - 1.5, dy - 1.5, 3, 3);
+        }
+    } else if (tri.sizeKey === 'M') {
+        ctx.fillRect(tri.cx - 3, tri.cy - 1, 2, 2);
+        ctx.fillRect(tri.cx + 1, tri.cy - 1, 2, 2);
+    } else {
+        ctx.fillRect(tri.cx - 1, tri.cy - 1, 2, 2);
+    }
+}
+
+function drawPlayer() {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+
+    // 主人公（丸）
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+    ctx.fillStyle = gameState === STATE.GAMEOVER ? COLORS.RED : COLORS.YELLOW;
+    ctx.fill();
+
+    // 上部砲口ノズル
+    ctx.fillStyle = COLORS.WHITE;
+    ctx.fillRect(-1.5, -player.radius - 2, 3, 3);
+    ctx.fillRect(-1.5, -1.5, 3, 3);
+
+    // デバッグモード時はマルチサンプリング判定点をすべて表示
+    if (debugMode) {
+        const samples = getPlayerSamplePoints({ x: 0, y: 0, radius: player.radius });
+        ctx.fillStyle = COLORS.CYAN;
+        for (const s of samples) {
+            ctx.fillRect(s.x - 1, s.y - 1, 2, 2);
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawBarycentricDebug() {
+    const info = (gameState === STATE.GAMEOVER && hitDebugInfo)
+        ? hitDebugInfo
+        : closestDebugInfo;
+
+    if (!info) return;
+
+    const { tri, bary, point } = info;
+    const [A, B, C] = tri.vertices;
+
+    ctx.save();
+    // 最接近の三角形を黄色い破線でロックオン
+    ctx.strokeStyle = COLORS.YELLOW;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y);
+    ctx.lineTo(B.x, B.y);
+    ctx.lineTo(C.x, C.y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // アクティブな判定点から3頂点A, B, Cへ伸びる緑色の補助線
+    ctx.strokeStyle = 'rgba(0, 255, 102, 0.72)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y); ctx.lineTo(A.x, A.y);
+    ctx.moveTo(point.x, point.y); ctx.lineTo(B.x, B.y);
+    ctx.moveTo(point.x, point.y); ctx.lineTo(C.x, C.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 頂点ラベル A, B, C
+    ctx.font = '9px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.textAlign = 'center';
+    ctx.fillText('A', A.x, A.y - 8);
+    ctx.fillText('B', B.x, B.y - 8);
+    ctx.fillText('C', C.x, C.y - 8);
+
+    // 画面左上にリアルタイム重心座標 (wA, wB, wC) を表示
+    const boxX = 16;
+    const boxY = PLAY_AREA_TOP + 8;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.fillRect(boxX, boxY, 240, 68);
+    ctx.strokeStyle = COLORS.DIM_CYAN;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(boxX, boxY, 240, 68);
+
+    ctx.font = '8px "Press Start 2P", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = COLORS.CYAN;
+    ctx.fillText(`BARYCENTRIC [SIZE:${tri.sizeKey}]`, boxX + 8, boxY + 13);
+
+    const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
+    ctx.fillStyle = bary.wA >= 0 ? COLORS.GREEN : COLORS.RED;
+    ctx.fillText(`wA: ${fmt(bary.wA)}`, boxX + 8, boxY + 29);
+
+    ctx.fillStyle = bary.wB >= 0 ? COLORS.GREEN : COLORS.RED;
+    ctx.fillText(`wB: ${fmt(bary.wB)}`, boxX + 8, boxY + 42);
+
+    ctx.fillStyle = bary.wC >= 0 ? COLORS.GREEN : COLORS.RED;
+    ctx.fillText(`wC: ${fmt(bary.wC)}`, boxX + 8, boxY + 55);
+
+    ctx.fillStyle = bary.inside ? COLORS.RED : COLORS.WHITE;
+    ctx.fillText(bary.inside ? '-> HIT!' : '-> SAFE', boxX + 128, boxY + 42);
+
+    ctx.restore();
+}
+
+function drawTitleScreen() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.68)';
+    ctx.fillRect(36, 70, WIDTH - 72, 340);
+    ctx.strokeStyle = COLORS.CYAN;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(36, 70, WIDTH - 72, 340);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.font = '10px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.CYAN;
+    ctx.fillText('1983 BARYCENTRIC SHOOTER EDITION', WIDTH / 2, 102);
+
+    ctx.font = '28px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.WHITE;
+    ctx.fillText('MÖBIUS SNOW', WIDTH / 2, 144);
+
+    // 撃破・分裂ルール図解 (L -> 3M -> 2S -> +100PTS)
+    const diagramY = 196;
+    ctx.font = '8px "Press Start 2P", monospace';
+    
+    drawMiniIcon(WIDTH / 2 - 175, diagramY, 15, COLORS.MAGENTA);
+    ctx.fillStyle = COLORS.MAGENTA;
+    ctx.fillText('L', WIDTH / 2 - 175, diagramY + 23);
+
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.fillText('HIT->3x', WIDTH / 2 - 115, diagramY);
+
+    drawMiniIcon(WIDTH / 2 - 55, diagramY, 10, COLORS.WHITE);
+    ctx.fillStyle = COLORS.WHITE;
+    ctx.fillText('M', WIDTH / 2 - 55, diagramY + 23);
+
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.fillText('HIT->2x', WIDTH / 2 + 5, diagramY);
+
+    drawMiniIcon(WIDTH / 2 + 65, diagramY, 6, COLORS.CYAN);
+    ctx.fillStyle = COLORS.CYAN;
+    ctx.fillText('S', WIDTH / 2 + 65, diagramY + 23);
+
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.fillText('-> +100PTS!', WIDTH / 2 + 145, diagramY);
+
+    ctx.font = '10px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.GREEN;
+    ctx.fillText('CURSOR KEYS : MOVE', WIDTH / 2, 266);
+    ctx.fillStyle = COLORS.YELLOW;
+    ctx.fillText('SPACE KEY   : FIRE MISSILE', WIDTH / 2, 290);
+    ctx.fillStyle = COLORS.CYAN;
+    ctx.fillText('D KEY       : BARYCENTRIC DEBUG', WIDTH / 2, 314);
+
+    if (Math.floor(frameCount / 28) % 2 === 0) {
+        ctx.font = '13px "Press Start 2P", monospace';
+        ctx.fillStyle = COLORS.WHITE;
+        ctx.fillText('PRESS [ENTER] TO START', WIDTH / 2, 368);
+    }
+}
+
+function drawMiniIcon(x, y, r, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+        const a = -Math.PI / 2 + (i * 2 * Math.PI) / 3;
+        const vx = x + r * Math.cos(a);
+        const vy = y + r * Math.sin(a);
+        if (i === 0) ctx.moveTo(vx, vy);
+        else ctx.lineTo(vx, vy);
+    }
+    ctx.closePath();
+    ctx.stroke();
+}
+
+function drawGameOverScreen() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+    ctx.fillRect(90, 125, WIDTH - 180, 225);
+    ctx.strokeStyle = COLORS.RED;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(90, 125, WIDTH - 180, 225);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.font = '24px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.RED;
+    ctx.fillText('GAME OVER', WIDTH / 2, 168);
+
+    ctx.font = '14px "Press Start 2P", monospace';
+    ctx.fillStyle = COLORS.WHITE;
+    ctx.fillText(`FINAL SCORE: ${score}`, WIDTH / 2, 215);
+
+    if (isNewRecord) {
+        if (Math.floor(frameCount / 15) % 2 === 0) {
+            ctx.font = '12px "Press Start 2P", monospace';
+            ctx.fillStyle = COLORS.YELLOW;
+            ctx.fillText('★ NEW HIGH SCORE! ★', WIDTH / 2, 252);
+        }
+    } else {
+        ctx.font = '11px "Press Start 2P", monospace';
+        ctx.fillStyle = COLORS.CYAN;
+        ctx.fillText(`HIGH SCORE: ${hiScore}`, WIDTH / 2, 252);
+    }
+
+    if (Math.floor(frameCount / 28) % 2 === 0) {
+        ctx.font = '11px "Press Start 2P", monospace';
+        ctx.fillStyle = COLORS.GREEN;
+        ctx.fillText('PRESS [ENTER] TO RETRY', WIDTH / 2, 308);
+    }
+}
+
+// ==========================================
+// メインアニメーションループ
+// ==========================================
+let lastTimestamp = 0;
+
+function gameLoop(timestamp) {
+    if (!lastTimestamp) lastTimestamp = timestamp;
+    const rawDt = (timestamp - lastTimestamp) / 1000;
+    lastTimestamp = timestamp;
+
+    const dt = Math.min(rawDt, 0.05);
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(gameLoop);
+}
+
+// 初期デモ用配置
+for (let i = 0; i < 10; i++) {
+    spawnTopTriangle(true);
+    triangles[i].cy = PLAY_AREA_TOP + Math.random() * (GROUND_Y - PLAY_AREA_TOP - 80);
+    updateTriangleVertices(triangles[i]);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
